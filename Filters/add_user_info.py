@@ -1,7 +1,7 @@
 """
-title: Add User Preferences
+title: Add User Informations
 author: Mara-Li
-description: Ajoute les préférences de l'utilisateur dans les messages, ainsi que son statut et d'autres informations.
+description: Add user informations to the conversation with user valves, like birthdate, likes, dislikes, etc. Add also __user__ metadata (name, email, role), and date and time of the message.
 required_open_webui_version: 0.5.0
 version: 0.0.1
 licence: MIT
@@ -106,7 +106,7 @@ class Filter:
         self,
         body: dict,
         __user__: Optional[dict] = None,
-        __event_emitter__: Callable[[dict], Any] = None, # type: ignore
+        __event_emitter__: Callable[[dict], Any] = None,  # type: ignore
     ) -> dict:
         # Récupérer les valves de l'utilisateur
         if __user__:
@@ -138,34 +138,21 @@ class Filter:
                     if self.user_valves.date_de_naissance
                     else None
                 ),
-                "Aime": (
-                    [x.strip() for x in self.user_valves.aime.split(",")]
-                    if self.user_valves.aime
-                    else None
-                ),
+                "Aime": ([x.strip() for x in self.user_valves.aime.split(",")] if self.user_valves.aime else None),
                 "N'aime pas": (
-                    [x.strip() for x in self.user_valves.aime_pas.split(",")]
-                    if self.user_valves.aime_pas
-                    else None
+                    [x.strip() for x in self.user_valves.aime_pas.split(",")] if self.user_valves.aime_pas else None
                 ),
-                "Couleur préférée": (
-                    self.user_valves.couleur_preferee
-                    if self.user_valves.couleur_preferee
-                    else None
-                ),
+                "Couleur préférée": (self.user_valves.couleur_preferee if self.user_valves.couleur_preferee else None),
             }
             statut_message = ""
             surnom_message = ""
             autre_message = ""
             if self.user_valves.statut:
-                statut_message = (
-                    f"L'utilisateur est, par rapport à toi : {self.user_valves.statut}\n"
-                )
+                statut_message = f"L'utilisateur est, par rapport à toi : {self.user_valves.statut}\n"
             if self.user_valves.surnom:
                 surnom_message = f"Tu peux l'appeler : {', '.join([x.strip() for x in self.user_valves.surnom.split(',')])} en fonction du contexte.\n"
             if self.user_valves.autres_infos:
                 autre_message = f"Autres informations entrée par l'utilisateur: {self.user_valves.autres_infos}\n"
-
 
         # Construire le contenu du message système
         system_message = "------ SYSTEM INFO ------\n"
@@ -175,7 +162,7 @@ class Filter:
         system_message += "Voici des informations à propos de l'utilisateur :\n"
         for key, val in user_info.items():
             system_message += f"- {key} : {val}\n"
-        
+
         is_empty = True
         if preferences:
             is_empty = all([val is None for val in preferences.values()])
@@ -193,8 +180,6 @@ class Filter:
 
         system_message += "Tu dois utiliser ses informations pour personnaliser tes réponses, et répondre de manière précise aux questions de l'utilisateur. Par exemple, si ce dernier mentionne avoir un chat, tu dois pouvoir répondre qu'il a un chat. De même, si l'utilisateur te demande l'heure ou la date du jour, tu dois pouvoir répondre !"
 
-        body.setdefault("messages", []).insert(
-            0, {"role": "system", "content": system_message}
-        )
+        body.setdefault("messages", []).insert(0, {"role": "system", "content": system_message})
 
         return body
