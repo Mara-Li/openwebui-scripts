@@ -1,10 +1,12 @@
 """
 title: Add User Informations
 author: Mara-Li
-description: Add user informations to the conversation with user valves, like birthdate, likes, dislikes, etc. Add also __user__ metadata (name, email, role), and date and time of the message.
+description: [French] Add user informations to the system prompt like birthdate, likes, dislikes, etc. Add also __user__ metadata (name, email, role), and date and time of the message. (Easily translatable to english)
 required_open_webui_version: 0.5.0
 version: 0.0.1
 licence: MIT
+author_url: https://github.com/mara-li
+git_url: https://github.com/mara-li/openwebui-scripts
 """
 
 from pydantic import BaseModel, Field

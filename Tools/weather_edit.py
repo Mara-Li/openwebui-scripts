@@ -2,7 +2,7 @@
 title: Weather from open-meteo.com (with User Valves)
 author: fianalins (edited by Mara-Li)
 author_url: https://github.com/open-webui
-git_url: https://github.com/open-webui
+git_url: https://github.com/mara-li/openwebui-scripts
 description: Tool for grabbing the current weather from a provided location. Also adding support for knots as a wind speed unit.
 version: 0.1.1
 licence: MIT
