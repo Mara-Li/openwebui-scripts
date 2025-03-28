@@ -1,7 +1,7 @@
 """
 title: Add User Informations
 author: Mara-Li
-description: [French] Add user informations to the system prompt like birthdate, likes, dislikes, etc. Add also __user__ metadata (name, email, role), and date and time of the message. (Easily translatable to english)
+description: Ajouter des informations sur l'utilisateur dans le prompt system comme la date de naissance, les goûts, etc. Permet d'ajouter également les métadonnées de l'utilisateur (nom, courriel, rôle), ainsi que la date et l'heure du message.
 required_open_webui_version: 0.5.0
 version: 0.0.1
 licence: MIT
@@ -57,6 +57,16 @@ class Filter:
             description="Surnom que peut vous donner l'application, séparé par des virgules (ex: Papa, Stéphane, Capitaine, etc.)",
             title="Surnoms",
         )
+        gender: Optional[str] = Field(
+            default=None,
+            description="Votre genre (ex: Homme, Femme, Autre, etc.)",
+            title="Genre",
+        )
+        pronom: Optional[str] = Field(
+            default=None,
+            description="Vos pronoms (ex: Il/Lui, Elle/Elle, etc.)",
+            title="Pronoms",
+        )
         autres_infos: Optional[str] = Field(
             default=None,
             title="Autres informations (zone de texte)",
@@ -65,6 +75,7 @@ class Filter:
 
     def __init__(self):
         self.valves = self.Valves()
+        self.user_valves = None
 
     def _format_date(self, date_str: Optional[str]) -> Optional[str]:
         if not date_str:
@@ -104,6 +115,10 @@ class Filter:
         now_desired = now_utc.astimezone(tz)
         return now_desired.strftime("%H:%M")
 
+    def _print(self, *message: object):
+        if self.valves.debug:
+            print("[AddUserInfo]", *message)
+
     async def inlet(
         self,
         body: dict,
@@ -114,13 +129,10 @@ class Filter:
         if __user__:
             raw_valves = __user__.get("valves", {})
             if isinstance(raw_valves, self.UserValves):
-                self.user_valves = raw_valves
-            else:
-                self.user_valves = self.UserValves(**raw_valves)
-        else:
-            self.user_valves = None
+                raw_valves = raw_valves.model_dump()
+            self.user_valves = self.UserValves(**raw_valves)
 
-        # print(f"User valves: {self.user_valves}")
+        self._print("User valves:", self.user_valves)
 
         user_info = {}
         if __user__:
@@ -134,12 +146,18 @@ class Filter:
         if not self.user_valves:
             preferences = None
         else:
-            preferences = {
-                "Date de naissance": (
+            if self.user_valves.gender:
+                user_info["Genre"] = self.user_valves.gender
+            if self.user_valves.pronom:
+                user_info["Pronoms"] = self.user_valves.pronom
+            if self.user_valves.date_de_naissance:
+                user_info["Date de naissance"] = (
                     self._format_date(self.user_valves.date_de_naissance)
                     if self.user_valves.date_de_naissance
                     else None
-                ),
+                )
+
+            preferences = {
                 "Aime": ([x.strip() for x in self.user_valves.aime.split(",")] if self.user_valves.aime else None),
                 "N'aime pas": (
                     [x.strip() for x in self.user_valves.aime_pas.split(",")] if self.user_valves.aime_pas else None
@@ -178,7 +196,7 @@ class Filter:
         system_message += statut_message
         system_message += surnom_message
         system_message += autre_message
-        print(f"System message: {system_message}")
+        self._print("System message", system_message)
 
         system_message += "Tu dois utiliser ses informations pour personnaliser tes réponses, et répondre de manière précise aux questions de l'utilisateur. Par exemple, si ce dernier mentionne avoir un chat, tu dois pouvoir répondre qu'il a un chat. De même, si l'utilisateur te demande l'heure ou la date du jour, tu dois pouvoir répondre !"
 
