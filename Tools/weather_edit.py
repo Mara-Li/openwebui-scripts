@@ -6,6 +6,7 @@ git_url: https://github.com/mara-li/openwebui-scripts
 description: Tool for grabbing the current weather from a provided location. Also adding support for knots as a wind speed unit.
 version: 0.1.1
 licence: MIT
+requirements: dateparser
 """
 
 import json
@@ -13,6 +14,8 @@ import requests
 from typing import Any, Dict, Optional, List
 from urllib.parse import quote
 from pydantic import BaseModel, Field
+from datetime import datetime
+import dateparser
 
 
 def speed_unit(unit: str, use_imperial: bool = False) -> str:
@@ -25,6 +28,18 @@ def speed_unit(unit: str, use_imperial: bool = False) -> str:
     }
     default = "mph" if use_imperial else ""
     return valid_speed_unit.get(unit.lower(), default)
+
+
+def resolve_datetime(date_str: Optional[str], hour_str: Optional[str]) -> datetime:
+    """Resolve date and hour strings to a datetime object."""
+    base = datetime.now()
+    combined_str = ""
+    if date_str:
+        combined_str += date_str
+    if hour_str:
+        combined_str += f" {hour_str}"
+    parsed = dateparser.parse(combined_str, settings={"RELATIVE_BASE": base})
+    return parsed or base
 
 
 class Tools:
@@ -77,11 +92,17 @@ class Tools:
     async def get_current_weather(
         self,
         location: str,
+        date: Optional[str] = None,
+        hour: Optional[str] = None,
         __user__: Optional[dict] = None,
         __event_emitter__=None,
     ) -> str:
         """
-        Get the current weather information for a given location using the Open-Meteo API.
+        Get the current weather information for a given location and day using the Open-Meteo API.
+
+        If the day is not provided, the current weather is returned. Date can be set in the current language as "today" or "tomorrow" or in different format, as "YYYY-MM-DD" or "DD/MM/YYYY".
+
+        If the hour is not provided, the current hour is returned. Hour can be set in the current language as "now", "in x hours", "at 2h" or in different format, as "HH:MM" or "HHMM".
 
         This asynchronous function supports queries that include both a city and state/region
         (e.g., "Columbus, Ohio"). It uses the geocoding API to resolve the location and then
@@ -181,7 +202,8 @@ class Tools:
                         "done": False,
                     },
                 })
-
+            resolved_dt = resolve_datetime(date, hour)
+            target_hour_str = resolved_dt.strftime("%Y-%m-%dT%H:00")
             # Build the list of hourly parameters.
             hourly_params = [
                 "apparent_temperature",
@@ -310,41 +332,34 @@ class Tools:
             hourly_data = weather_data.get("hourly", {})
             hourly_times = hourly_data.get("time", [])
             try:
+                index = hourly_times.index(target_hour_str)
+            except ValueError:
+                index = 0
+            try:
                 index = hourly_times.index(time_str)
             except ValueError:
                 index = 0
-            apparent_temperature = (hourly_data.get("apparent_temperature", [None]) or [None])[index]
-            rel_humidity = (hourly_data.get("relativehumidity_2m", [None]) or [None])[index]
-            precipitation = (hourly_data.get("precipitation", [None]) or [None])[index]
-            dew_point = (
-                (hourly_data.get("dewpoint_2m", [None]) or [None])[index] if self.user_valves.show_humidity else None
-            )
+
+            def extract_value(key):
+                return (hourly_data.get(key, [None]) or [None])[index]
+
+            apparent_temperature = extract_value("apparent_temperature")
+            rel_humidity = extract_value("relativehumidity_2m")
+            precipitation = extract_value("precipitation")
+            dew_point = extract_value("dewpoint_2m") if self.user_valves.show_humidity else None
             precip_probability = (
-                (hourly_data.get("precipitation_probability", [None]) or [None])[index]
-                if self.user_valves.show_precipitation
-                else None
+                extract_value("precipitation_probability") if self.user_valves.show_precipitation else None
             )
-            visibility = (
-                (hourly_data.get("visibility", [None]) or [None])[index] if self.user_valves.show_visibility else None
-            )
-            pressure = (
-                (hourly_data.get("surface_pressure", [None]) or [None])[index]
-                if self.user_valves.show_pressure
-                else None
-            )
-            cloud_cover = (
-                (hourly_data.get("cloudcover", [None]) or [None])[index] if self.user_valves.show_cloud_cover else None
-            )
+            visibility = extract_value("visibility") if self.user_valves.show_visibility else None
+            pressure = extract_value("surface_pressure") if self.user_valves.show_pressure else None
+            cloud_cover = extract_value("cloudcover") if self.user_valves.show_cloud_cover else None
 
             # Retrieve daily data if needed.
             daily_data = weather_data.get("daily", {})
-            current_date = time_str.split("T")[0]
-            daily_index = 0
-            if "time" in daily_data:
-                try:
-                    daily_index = daily_data["time"].index(current_date)
-                except ValueError:
-                    daily_index = 0
+            current_date = target_hour_str.split("T")[0]
+            daily_index = (
+                daily_data.get("time", []).index(current_date) if current_date in daily_data.get("time", []) else 0
+            )
             uv_index = daily_data.get("uv_index_max", [None])[daily_index] if self.user_valves.show_uv_index else None
             sunrise = daily_data.get("sunrise", [None])[daily_index] if self.user_valves.show_sun_times else None
             sunset = daily_data.get("sunset", [None])[daily_index] if self.user_valves.show_sun_times else None
