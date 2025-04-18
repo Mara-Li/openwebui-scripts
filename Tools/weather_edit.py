@@ -109,17 +109,20 @@ class Tools:
     async def get_current_weather(
         self,
         location: str,
-        date: Optional[str] = None,
-        hour: Optional[str] = None,
+        date: str = "",
+        hour: str = "",
         __user__: Optional[dict] = None,
         __event_emitter__=None,
     ) -> str:
         """
         Get the current weather information for a given location and day using the Open-Meteo API.
 
-        If the day is not provided, the current weather is returned. Date can be set in the current language as "today" or "tomorrow" or in different format, as "YYYY-MM-DD" or "DD/MM/YYYY".
+        If the day is not provided, the current weather is returned.
 
-        If the hour is not provided, the current hour is returned. Hour can be set in the current language as "now", "in x hours", "at 2h" or in different format, as "HH:MM" or "HHMM".
+        Date can be set in the current language as "today" or "tomorrow" or in different format, as "YYYY-MM-DD" or "DD/MM/YYYY". You can use also different language ("fr", "de", "es", etc.).
+        For example, an user can say "aujourd'hui" or "demain" in French, and the tool will understand it as "today" or "tomorrow".
+
+        If the hour is not provided, the current hour is returned. Hour can be set in the current language as "now", "in x hours", "at 2h" or in different format, as "HH:MM" or "HHMM". It can be also set in different language ("fr", "de", "es", etc.). So for example, an user can say "maintenant" or "dans 2 heures" in French, and the tool will understand it as "now" or "in 2 hours".
 
         This asynchronous function supports queries that include both a city and state/region
         (e.g., "Columbus, Ohio"). It uses the geocoding API to resolve the location and then
@@ -148,6 +151,8 @@ class Tools:
         :param __event_emitter__: A callable used to emit status messages.
         :return: A json string containing the current weather information.
         """
+        print("[DEBUG] get_current_weather called")
+        print(f"[DEBUG] Location: {location}, Date: {date}, Hour: {hour}")
         if __user__:
             raw_valves = __user__.get("valves", {})
             if isinstance(raw_valves, self.UserValves):
