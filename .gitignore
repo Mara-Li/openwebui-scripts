@@ -1,3 +1,5 @@
 test.py
 _*
 .env
+__pycache__/
+.venv
