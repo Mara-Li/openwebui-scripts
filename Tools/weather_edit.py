@@ -10,6 +10,7 @@ requirements: dateparser
 """
 
 import json
+import re
 import requests
 from typing import Any, Dict, Optional, List
 from urllib.parse import quote
@@ -30,15 +31,27 @@ def speed_unit(unit: str, use_imperial: bool = False) -> str:
     return valid_speed_unit.get(unit.lower(), default)
 
 
-def resolve_datetime(date_str: Optional[str], hour_str: Optional[str]) -> datetime:
+def parse_time_string(time_str: Optional[str]) -> Optional[str]:
+    if not time_str:
+        return None
+    match = re.match(r"\s*à?\s*(\d{1,2})h", time_str.strip(), re.IGNORECASE)
+    if match:
+        hour = match.group(1)
+        return f"{hour}:00"
+    return time_str.strip()
+
+
+def resolve_datetime(date_str: Optional[str], hour_str: Optional[str], lang: str) -> datetime:
     """Resolve date and hour strings to a datetime object."""
     base = datetime.now()
     combined_str = ""
     if date_str:
         combined_str += date_str
     if hour_str:
-        combined_str += f" {hour_str}"
-    parsed = dateparser.parse(combined_str, settings={"RELATIVE_BASE": base})
+        combined_str += f" {parse_time_string(hour_str)}"
+    language = ["en", lang] if lang else ["en"]
+    print("Combined string:", combined_str)
+    parsed = dateparser.parse(combined_str, settings={"RELATIVE_BASE": base}, languages=language)
     return parsed or base
 
 
@@ -82,6 +95,10 @@ class Tools:
             description="Toggle to include pressure information (surface pressure).",
         )
         show_cloud_cover: bool = Field(default=False, description="Toggle to include cloud cover information.")
+        language: str = Field(
+            default="en",
+            description="Language for the weather report. Default is English.",
+        )
 
     def __init__(self):
         """Initialize the tool and its valves."""
@@ -122,8 +139,12 @@ class Tools:
           - show_cloud_cover: Includes cloud cover (hourly).
         **Valves (string):**
         - wind_speed_unit: The unit used for wind speed (km/h, m/s, mph or Knots).
+        - language: The language for the weather report (e.g., "en", "fr", "de").
 
         :param location: The name of the location (e.g., "Berlin", "Columbus, Ohio").
+        :param date: The date for which to get the weather (e.g., "today", "tomorrow", "2023-10-01").
+        :param hour: The hour for which to get the weather (e.g., "now", "in 2 hours", "14:00").
+        :param __user__: A dictionary containing user settings for the tool.
         :param __event_emitter__: A callable used to emit status messages.
         :return: A json string containing the current weather information.
         """
@@ -202,13 +223,17 @@ class Tools:
                         "done": False,
                     },
                 })
-            resolved_dt = resolve_datetime(date, hour)
+            resolved_dt = resolve_datetime(date, hour, self.user_valves.language)
             target_hour_str = resolved_dt.strftime("%Y-%m-%dT%H:00")
             # Build the list of hourly parameters.
             hourly_params = [
                 "apparent_temperature",
                 "relativehumidity_2m",
                 "precipitation",
+                "windspeed_10m",
+                "winddirection_10m",
+                "weathercode",
+                "temperature_2m",
             ]
             if self.user_valves.show_humidity:
                 hourly_params.append("dewpoint_2m")
@@ -266,9 +291,9 @@ class Tools:
                         "type": "status",
                         "data": {"description": error_msg, "done": True},
                     })
+                print(f"Error: {weather_response.status_code} - {weather_response.text}")
                 return json.dumps({"message": error_msg}, ensure_ascii=False)
             weather_data = weather_response.json()
-
             # Emit a status message indicating that data is being processed.
             if __event_emitter__ is not None:
                 await __event_emitter__({
@@ -289,11 +314,11 @@ class Tools:
                         "data": {"description": error_msg, "done": True},
                     })
                 return json.dumps({"message": error_msg}, ensure_ascii=False)
-            time_str: str = current_weather.get("time", "N/A")
-            temperature: float = current_weather.get("temperature", 0.0)
-            windspeed: Any = current_weather.get("windspeed", "N/A")
-            winddirection: Any = current_weather.get("winddirection", "N/A")
-            weathercode: int = current_weather.get("weathercode", -1)
+
+            temperature = current_weather.get("temperature", 0.0)
+            windspeed = current_weather.get("windspeed", "N/A")
+            winddirection = current_weather.get("winddirection", "N/A")
+            weathercode = current_weather.get("weathercode", -1)
 
             # Map weather codes to human-readable descriptions.
             weather_code_mapping = {
@@ -331,14 +356,16 @@ class Tools:
             # Retrieve hourly data.
             hourly_data = weather_data.get("hourly", {})
             hourly_times = hourly_data.get("time", [])
-            try:
+            if target_hour_str in hourly_times:
                 index = hourly_times.index(target_hour_str)
-            except ValueError:
-                index = 0
-            try:
-                index = hourly_times.index(time_str)
-            except ValueError:
-                index = 0
+            else:
+                print("[DEBUG] Exact hour not found, falling back to best match.")
+                index = max(i for i, t in enumerate(hourly_times) if t.startswith(target_hour_str[:13]))
+            print(f"[DEBUG] Requested datetime: {target_hour_str}")
+            print(f"[DEBUG] Index found: {index}")
+            print(f"[DEBUG] Matching hourly time: {hourly_times[index]}")
+            print(f"[DEBUG] Temperature @ index: {hourly_data.get('temperature_2m', ['?'])[index]}")
+            print(f"[DEBUG] Apparent Temperature @ index: {hourly_data.get('apparent_temperature', ['?'])[index]}")
 
             def extract_value(key):
                 return (hourly_data.get(key, [None]) or [None])[index]
@@ -353,7 +380,10 @@ class Tools:
             visibility = extract_value("visibility") if self.user_valves.show_visibility else None
             pressure = extract_value("surface_pressure") if self.user_valves.show_pressure else None
             cloud_cover = extract_value("cloudcover") if self.user_valves.show_cloud_cover else None
-
+            temperature = extract_value("temperature_2m")
+            windspeed = extract_value("windspeed_10m")
+            winddirection = extract_value("winddirection_10m")
+            weathercode = extract_value("weathercode")
             # Retrieve daily data if needed.
             daily_data = weather_data.get("daily", {})
             current_date = target_hour_str.split("T")[0]
@@ -372,7 +402,7 @@ class Tools:
             # Build the weather report.
             report_lines = [
                 f"Weather for {resolved_location} (Latitude: {latitude}, Longitude: {longitude}):",
-                f"Time: {time_str}",
+                f"Time: {target_hour_str}",
                 f"Temperature: {temperature:.1f}{temp_unit}",
                 f"Feels Like: {apparent_temperature:.1f}{temp_unit}",
             ]
@@ -421,4 +451,5 @@ class Tools:
                         "done": True,
                     },
                 })
-            return json.dumps({"message": error_msg}, ensure_ascii=False)
+            print(f"Error: {e}")
+            return json.dumps({"message": f"An error occurred: {str(e)}"}, ensure_ascii=False)
