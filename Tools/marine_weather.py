@@ -4,7 +4,7 @@ author: Mara-Li
 author_url: https://github.com/open-webui
 git_url: https://github.com/mara-li/openwebui-scripts
 description: Tool to get marine weather from World Weather Online API.
-version: 0.0.1
+version: 0.1.1
 licence: MIT
 requirements: dateparser
 """
@@ -100,6 +100,218 @@ def format_unit(value: Union[str, float], unit_type: str, unit_system: str) -> T
     return value_float, ""
 
 
+async def resolve_name(lat: float, lon: float):
+    url = "https://nominatim.openstreetmap.org/reverse"
+    params = {
+        "lat": lat,
+        "lon": lon,
+        "format": "json",
+        "zoom": 10,  # niveau de détail (10 = ville, 18 = adresse précise)
+        "addressdetails": 1,
+    }
+    headers = {"User-Agent": "OpenWebUI-WeatherScript"}
+    resp = requests.get(url, params=params, headers=headers)
+    if resp.ok:
+        data = resp.json()
+        return data.get("display_name", f"{lat},{lon}")
+    return f"{lat},{lon}"
+
+
+async def resolve_location(location: str = "", __event_emitter__=None, __metadata__: Optional[dict] = None):
+    """Resolve location to coordinates."""
+    search_geo = True
+    resolved_name = location
+    lat, lon = 0, 0
+    if location == "" and __metadata__ and __metadata__.get("variables"):
+        meta_location = __metadata__["variables"].get("{{USER_LOCATION}}")
+        if meta_location:
+            # format: 45.775, 4.881 (lat, long)
+            meta_location_reg = re.match(r"(?P<lat>[\d\.]+), (?P<long>[\d\.]+)", meta_location)
+            if meta_location_reg:
+                lat = float(meta_location_reg.group("lat").strip())
+                lon = float(meta_location_reg.group("long").strip())
+                resolved_name = await resolve_name(lat, lon)
+            return lat, lon, resolved_name
+
+    # Check if location is already coordinates
+    if "," in location or "/" in location or "x" in location:
+        parts = (
+            location.split(",") if "," in location else location.split("/") if "/" in location else location.split("x")
+        )
+        if len(parts) >= 2:
+            search_geo = False
+            lat = parts[0].strip()
+            lon = parts[1].strip()
+            if lat.endswith("°"):
+                lat = lat[:-1].strip()
+            if lon.endswith("°"):
+                lon = lon[:-1].strip()
+            resolved_name = await resolve_name(float(lat), float(lon))
+            lat = float(lat)
+            lon = float(lon)
+
+    # If not coordinates, search for location
+    if search_geo:
+        await emit_status(__event_emitter__, f"Fetching location data for '{location}'...", False)
+
+        city_query = location.replace(" ", "-")
+        state_query: Optional[str] = None
+        if "," in city_query:
+            parts: list[str] = city_query.split(",")
+            city_query = parts[0].strip()
+            state_query = parts[1].strip()
+
+        encoded_city = quote(city_query)
+        geo = requests.get(f"https://geocoding-api.open-meteo.com/v1/search?name={encoded_city}&count=10")
+
+        if geo.status_code != 200:
+            raise ValueError("Could not get geolocation data.")
+
+        geo_data = geo.json()
+        if "results" not in geo_data or not geo_data["results"]:
+            raise ValueError(f"Location '{location}' not found.")
+
+        chosen_geo: dict[str, Any] = {}
+        if state_query:
+            for result in geo_data["results"]:
+                if "admin1" in result and result["admin1"].lower() == state_query.lower():
+                    chosen_geo = result
+                    break
+
+        if not chosen_geo:
+            chosen_geo = geo_data["results"][0]
+
+        lat = chosen_geo["latitude"]
+        lon = chosen_geo["longitude"]
+        resolved_name = geo_data["results"][0]["name"]
+
+    return lat, lon, resolved_name
+
+
+def build_weather_url(lat: float, lon: float, user_valves, valves) -> str:
+    """Build the weather API URL with appropriate parameters."""
+    url = f"http://api.worldweatheronline.com/premium/v1/marine.ashx?key={valves.api_key}&q={lat},{lon}&format=json"
+
+    if user_valves.tp:
+        url += f"&tp={user_valves.tp}"
+
+    if user_valves.lang:
+        url += f"&lang={user_valves.lang}"
+
+    url += f"&tide={'yes' if user_valves.tide else 'no'}"
+    url += f"&includeLocation={'yes' if user_valves.includelocation else 'no'}"
+
+    return url
+
+
+def format_weather_report(weather_data: Dict, parsed_date, user_valves, hour: str = "") -> List[str]:
+    """Format weather data into readable report."""
+    report = []
+    languages = ["en", user_valves.lang] if user_valves.lang else ["en"]
+    weather_days = weather_data["data"].get("weather", [])
+
+    for day in weather_days:
+        date_str = day["date"]
+        if parsed_date and parsed_date.date().isoformat() != date_str:
+            continue
+
+        astronomy = day.get("astronomy", [{}])[0]
+        report.append(f"Date: {date_str}")
+        report.append(f"Sunrise: {astronomy.get('sunrise', '?')} | Sunset: {astronomy.get('sunset', '?')}")
+
+        selected_hours = day.get("hourly", [])
+        if hour:
+            parsed_time = dateparser.parse(parse_time_string(hour), languages=languages)
+            if parsed_time:
+                user_hour_str = f"{parsed_time.hour:02}00"
+            else:
+                user_hour_str = re.sub(r"\\D", "", hour).zfill(4)
+
+            matched_hours = [h for h in selected_hours if h["time"].zfill(4) == user_hour_str]
+            if not matched_hours:
+                all_times = sorted((int(h["time"]) for h in selected_hours))
+                fallback_time = min(
+                    (t for t in all_times if t > int(user_hour_str)), default=max(all_times, default=None)
+                )
+                if fallback_time is not None:
+                    user_hour_str = str(fallback_time).zfill(4)
+                    matched_hours = [h for h in selected_hours if h["time"].zfill(4) == user_hour_str]
+            selected_hours = matched_hours
+
+        for hourly in selected_hours:
+            time_h = hourly["time"].zfill(4)
+            hour_label = f"{time_h[:-2]}:{time_h[-2:]}"
+
+            # Format temperature data
+            temp_unit = "°C"
+            temp = float(hourly["tempC"])
+            water_temp = float(hourly["waterTemp_C"])
+            feel_like = float(hourly["FeelsLikeC"])
+
+            if user_valves.temp == "fahrenheit":
+                temp_unit = "°F"
+                temp = float(hourly["tempF"])
+                water_temp = float(hourly["waterTemp_F"])
+                feel_like = float(hourly["FeelsLikeF"])
+            elif user_valves.temp == "kelvin":
+                temp_unit = "K"
+                temp = float(hourly["tempC"]) + 273.15
+                water_temp = float(hourly["waterTemp_C"]) + 273.15
+                feel_like = float(hourly["FeelsLikeC"]) + 273.15
+
+            # Format wind data
+            wind_unit = "km/h"
+            wind = float(hourly["windspeedKmph"])
+            if user_valves.wind == "imperial":
+                wind = float(hourly["windspeedMiles"])
+                wind_unit = "mph"
+            elif user_valves.wind == "knots":
+                wind_unit = "knots"
+                wind = round(wind * 0.539957, 1)
+
+            # Format other measurements based on unit system
+            dist_unit = "m"
+            swell_height = float(hourly["swellHeight_m"])
+            visibility = float(hourly["visibility"])
+            pressure = hourly["pressure"]
+            unit = "hPa"
+
+            if user_valves.units == "imperial":
+                pressure = float(hourly["pressureInches"])
+                unit = "inHg"
+                swell_height = float(hourly["swellHeight_ft"])
+                visibility = float(hourly["visibilityMiles"])
+                dist_unit = "miles"
+
+            # Get description in appropriate language
+            desc = hourly["weatherDesc"][0]["value"]
+            if user_valves.lang and f"lang_{user_valves.lang}" in hourly:
+                desc = hourly[f"lang_{user_valves.lang}"][0]["value"]
+
+            # Format hourly report
+            report.extend([
+                f"\n— {hour_label} —",
+                f"Temp: {temp} {temp_unit} (Feel Like: {feel_like} {temp_unit}) | Water: {water_temp} {temp_unit}",
+                f"Wind: {wind} {wind_unit} ({hourly['winddir16Point']})",
+                f"Swell: {swell_height} {dist_unit} {hourly['swellDir16Point']} {hourly['swellPeriod_secs']}s",
+                f"Pressure: {pressure} {unit} | Humidity: {hourly['humidity']}%",
+                f"Visibility: {visibility} {dist_unit} | Cloud Cover: {hourly['cloudcover']}%",
+                f"UV Index: {hourly['uvIndex']}",
+                f"Weather: {desc}",
+            ])
+
+    return report
+
+
+async def emit_status(__event_emitter__=None, description: str = "", done: bool = False) -> None:
+    """Helper method to emit status updates to the user."""
+    if __event_emitter__ is not None:
+        await __event_emitter__({
+            "type": "status",
+            "data": {"description": description, "done": done},
+        })
+
+
 class Tools:
     class Valves(BaseModel):
         citation: bool = Field(
@@ -140,235 +352,23 @@ class Tools:
     def __init__(self):
         self.valves = self.Valves()
         self.user_valves = self.UserValves()
-
-    async def _emit_status(self, __event_emitter__=None, description: str = "", done: bool = False) -> None:
-        """Helper method to emit status updates to the user."""
-        if __event_emitter__ is not None:
-            await __event_emitter__({
-                "type": "status",
-                "data": {"description": description, "done": done},
-            })
-
-    async def resolve_name(self, lat: float, lon: float):
-        url = "https://nominatim.openstreetmap.org/reverse"
-        params = {
-            "lat": lat,
-            "lon": lon,
-            "format": "json",
-            "zoom": 10,  # niveau de détail (10 = ville, 18 = adresse précise)
-            "addressdetails": 1,
-        }
-        headers = {"User-Agent": "OpenWebUI-WeatherScript"}
-        resp = requests.get(url, params=params, headers=headers)
-        if resp.ok:
-            data = resp.json()
-            return data.get("display_name", f"{lat},{lon}")
-        return f"{lat},{lon}"
-
-    async def _resolve_location(self, location: str = "", __event_emitter__=None, __metadata__: Optional[dict] = None):
-        """Resolve location to coordinates."""
-        search_geo = True
-        resolved_name = location
-        lat, lon = 0, 0
-        if location == "" and __metadata__ and __metadata__.get("variables"):
-            meta_location = __metadata__["variables"].get("{{USER_LOCATION}}")
-            if meta_location:
-                # format: 45.775, 4.881 (lat, long)
-                meta_location_reg = re.match(r"(?P<lat>[\d\.]+), (?P<long>[\d\.]+)", meta_location)
-                if meta_location_reg:
-                    lat = float(meta_location_reg.group("lat").strip())
-                    lon = float(meta_location_reg.group("long").strip())
-                    resolved_name = await self.resolve_name(lat, lon)
-                return lat, lon, resolved_name
-
-        # Check if location is already coordinates
-        if "," in location or "/" in location or "x" in location:
-            parts = (
-                location.split(",")
-                if "," in location
-                else location.split("/")
-                if "/" in location
-                else location.split("x")
-            )
-            if len(parts) >= 2:
-                search_geo = False
-                lat = parts[0].strip()
-                lon = parts[1].strip()
-                if lat.endswith("°"):
-                    lat = lat[:-1].strip()
-                if lon.endswith("°"):
-                    lon = lon[:-1].strip()
-                resolved_name = await self.resolve_name(float(lat), float(lon))
-                lat = float(lat)
-                lon = float(lon)
-
-        # If not coordinates, search for location
-        if search_geo:
-            await self._emit_status(__event_emitter__, f"Fetching location data for '{location}'...", False)
-
-            city_query = location.replace(" ", "-")
-            state_query: Optional[str] = None
-            if "," in city_query:
-                parts: list[str] = city_query.split(",")
-                city_query = parts[0].strip()
-                state_query = parts[1].strip()
-
-            encoded_city = quote(city_query)
-            geo = requests.get(f"https://geocoding-api.open-meteo.com/v1/search?name={encoded_city}&count=10")
-
-            if geo.status_code != 200:
-                raise ValueError("Could not get geolocation data.")
-
-            geo_data = geo.json()
-            if "results" not in geo_data or not geo_data["results"]:
-                raise ValueError(f"Location '{location}' not found.")
-
-            chosen_geo: dict[str, Any] = {}
-            if state_query:
-                for result in geo_data["results"]:
-                    if "admin1" in result and result["admin1"].lower() == state_query.lower():
-                        chosen_geo = result
-                        break
-
-            if not chosen_geo:
-                chosen_geo = geo_data["results"][0]
-
-            lat = chosen_geo["latitude"]
-            lon = chosen_geo["longitude"]
-            resolved_name = geo_data["results"][0]["name"]
-
-        return lat, lon, resolved_name
-
-    def _build_weather_url(self, lat: float, lon: float) -> str:
-        """Build the weather API URL with appropriate parameters."""
-        url = (
-            f"http://api.worldweatheronline.com/premium/v1/marine.ashx?key={self.valves.api_key}"
-            f"&q={lat},{lon}&format=json"
-        )
-
-        if self.user_valves.tp:
-            url += f"&tp={self.user_valves.tp}"
-
-        if self.user_valves.lang:
-            url += f"&lang={self.user_valves.lang}"
-
-        url += f"&tide={'yes' if self.user_valves.tide else 'no'}"
-        url += f"&includeLocation={'yes' if self.user_valves.includelocation else 'no'}"
-
-        return url
-
-    def _format_weather_report(self, weather_data: Dict, parsed_date, hour: str = "") -> List[str]:
-        """Format weather data into readable report."""
-        report = []
-        languages = ["en", self.user_valves.lang] if self.user_valves.lang else ["en"]
-        weather_days = weather_data["data"].get("weather", [])
-
-        for day in weather_days:
-            date_str = day["date"]
-            if parsed_date and parsed_date.date().isoformat() != date_str:
-                continue
-
-            astronomy = day.get("astronomy", [{}])[0]
-            report.append(f"Date: {date_str}")
-            report.append(f"Sunrise: {astronomy.get('sunrise', '?')} | Sunset: {astronomy.get('sunset', '?')}")
-
-            selected_hours = day.get("hourly", [])
-            if hour:
-                parsed_time = dateparser.parse(parse_time_string(hour), languages=languages)
-                if parsed_time:
-                    user_hour_str = f"{parsed_time.hour:02}00"
-                else:
-                    user_hour_str = re.sub(r"\\D", "", hour).zfill(4)
-
-                matched_hours = [h for h in selected_hours if h["time"].zfill(4) == user_hour_str]
-                if not matched_hours:
-                    all_times = sorted((int(h["time"]) for h in selected_hours))
-                    fallback_time = min(
-                        (t for t in all_times if t > int(user_hour_str)), default=max(all_times, default=None)
-                    )
-                    if fallback_time is not None:
-                        user_hour_str = str(fallback_time).zfill(4)
-                        matched_hours = [h for h in selected_hours if h["time"].zfill(4) == user_hour_str]
-                selected_hours = matched_hours
-
-            for hourly in selected_hours:
-                time_h = hourly["time"].zfill(4)
-                hour_label = f"{time_h[:-2]}:{time_h[-2:]}"
-
-                # Format temperature data
-                temp_unit = "°C"
-                temp = float(hourly["tempC"])
-                water_temp = float(hourly["waterTemp_C"])
-                feel_like = float(hourly["FeelsLikeC"])
-
-                if self.user_valves.temp == "fahrenheit":
-                    temp_unit = "°F"
-                    temp = float(hourly["tempF"])
-                    water_temp = float(hourly["waterTemp_F"])
-                    feel_like = float(hourly["FeelsLikeF"])
-                elif self.user_valves.temp == "kelvin":
-                    temp_unit = "K"
-                    temp = float(hourly["tempC"]) + 273.15
-                    water_temp = float(hourly["waterTemp_C"]) + 273.15
-                    feel_like = float(hourly["FeelsLikeC"]) + 273.15
-
-                # Format wind data
-                wind_unit = "km/h"
-                wind = float(hourly["windspeedKmph"])
-                if self.user_valves.wind == "imperial":
-                    wind = float(hourly["windspeedMiles"])
-                    wind_unit = "mph"
-                elif self.user_valves.wind == "knots":
-                    wind_unit = "knots"
-                    wind = round(wind * 0.539957, 1)
-
-                # Format other measurements based on unit system
-                dist_unit = "m"
-                swell_height = float(hourly["swellHeight_m"])
-                visibility = float(hourly["visibility"])
-                pressure = hourly["pressure"]
-                unit = "hPa"
-
-                if self.user_valves.units == "imperial":
-                    pressure = float(hourly["pressureInches"])
-                    unit = "inHg"
-                    swell_height = float(hourly["swellHeight_ft"])
-                    visibility = float(hourly["visibilityMiles"])
-                    dist_unit = "miles"
-
-                # Get description in appropriate language
-                desc = hourly["weatherDesc"][0]["value"]
-                if self.user_valves.lang and f"lang_{self.user_valves.lang}" in hourly:
-                    desc = hourly[f"lang_{self.user_valves.lang}"][0]["value"]
-
-                # Format hourly report
-                report.extend([
-                    f"\n— {hour_label} —",
-                    f"Temp: {temp} {temp_unit} (Feel Like: {feel_like} {temp_unit}) | Water: {water_temp} {temp_unit}",
-                    f"Wind: {wind} {wind_unit} ({hourly['winddir16Point']})",
-                    f"Swell: {swell_height} {dist_unit} {hourly['swellDir16Point']} {hourly['swellPeriod_secs']}s",
-                    f"Pressure: {pressure} {unit} | Humidity: {hourly['humidity']}%",
-                    f"Visibility: {visibility} {dist_unit} | Cloud Cover: {hourly['cloudcover']}%",
-                    f"UV Index: {hourly['uvIndex']}",
-                    f"Weather: {desc}",
-                ])
-
-        return report
+        self.citation = self.valves.citation
 
     async def get_marine_weather(
         self,
         location: str = "",
         date: str = "",
         hour: str = "",
-        __metadata__: Optional[dict] = None,
         __user__: Optional[dict] = None,
+        __metadata__: Optional[dict] = None,
         __event_emitter__=None,
     ) -> str:
         """
         Get the current marine weather for a given location using World Weather Online API.
 
-        The location can be optional, and empty. If not provided, the function will attempt to resolve the location from the metadata.
-        The location, if provided, can be a city name, a state name, or a combination of both (e.g., "Berlin", "Columbus, Ohio"). It can also be coordinate values (e.g., "45.775, 4.881" or "45.775/4.881" or "45.775x4.881").
+        The location can be optional, and empty. If not provided, the function will attempt to resolve the location from the __metadata__ object, and you will use it.
+
+        If provided, The location can be a city name, a state name, or a combination of both (e.g., "Berlin", "Columbus, Ohio"). It can also be coordinate values (e.g., "45.775, 4.881" or "45.775/4.881" or "45.775x4.881").
 
         Date can be set in the current language as "today" or "tomorrow" or in different format, as "YYYY-MM-DD" or "DD/MM/YYYY". You can use also different language ("fr", "de", "es", etc.).
         For example, an user can say "aujourd'hui" or "demain" in French, and the tool will understand it as "today" or "tomorrow".
@@ -397,9 +397,10 @@ class Tools:
         :param __event_emitter__: A callable used to emit status messages.
         :return: A json string containing the weather information.
         """
+        await emit_status(__event_emitter__, "Fetching marine weather data...", False)
         if __user__ and __user__.get("valves"):
             self.user_valves: Tools.UserValves = __user__.get("valves", self.user_valves)
-
+        await emit_status(__event_emitter__, f"User valves loaded as {self.user_valves.model_dump_json()}.", False)
         try:
             # Validate TP parameter
             valid_tp = ["1", "3", "6", "12", "24"]
@@ -407,30 +408,30 @@ class Tools:
                 error_msg = (
                     f"Error: Invalid time interval '{self.user_valves.tp}'. Valid values are {', '.join(valid_tp)}."
                 )
-                await self._emit_status(__event_emitter__, error_msg, True)
+                await emit_status(__event_emitter__, error_msg, True)
                 return json.dumps({"message": error_msg}, ensure_ascii=False)
 
             # Resolve location to coordinates
-            lat, lon, resolved_name = await self._resolve_location(location, __event_emitter__)
+            lat, lon, resolved_name = await resolve_location(location, __event_emitter__, __metadata__)
             print(f"Resolved location: {resolved_name} ({lat}, {lon})")
 
             # Fetch weather data
-            await self._emit_status(
+            await emit_status(
                 __event_emitter__, f"Location resolved: {resolved_name}. Fetching forecast data...", False
             )
 
-            url = self._build_weather_url(lat, lon)
+            url = build_weather_url(lat, lon, self.user_valves, self.valves)
             response = requests.get(url)
 
             if response.status_code != 200:
                 error_msg = "Error: Could not get weather data."
-                await self._emit_status(__event_emitter__, error_msg, True)
+                await emit_status(__event_emitter__, error_msg, True)
                 return json.dumps({"message": error_msg}, ensure_ascii=False)
 
             data = response.json()
             if not data["data"].get("weather", []):
                 error_msg = "Error: No weather data available."
-                await self._emit_status(__event_emitter__, error_msg, True)
+                await emit_status(__event_emitter__, error_msg, True)
                 return json.dumps({"message": error_msg}, ensure_ascii=False)
 
             # Parse date
@@ -438,13 +439,13 @@ class Tools:
             parsed_date = dateparser.parse(date, languages=languages) if date else dateparser.parse("today")
 
             # Generate report
-            report = self._format_weather_report(data, parsed_date, hour)
+            report = format_weather_report(data, parsed_date, self.user_valves, hour)
 
             # Success
-            await self._emit_status(__event_emitter__, "Weather data fetched successfully.", True)
+            await emit_status(__event_emitter__, "Weather data fetched successfully.", True)
             return json.dumps({"message": "\n".join(report)}, ensure_ascii=False)
 
         except Exception as e:
-            error_msg = f"An error occurred: {str(e)}"
-            await self._emit_status(__event_emitter__, error_msg, True)
+            error_msg = f"An error occurred: {str(e)} - {e.__class__.__name__} at stack: {str(e.__traceback__)}. User valves: {self.user_valves.model_dump_json()}"
+            await emit_status(__event_emitter__, error_msg, True)
             return json.dumps({"message": error_msg}, ensure_ascii=False)

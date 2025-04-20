@@ -4,7 +4,7 @@ author: fianalins (edited by Mara-Li)
 author_url: https://github.com/open-webui
 git_url: https://github.com/mara-li/openwebui-scripts
 description: Tool for grabbing the current weather from a provided location. Also adding support for knots as a wind speed unit.
-version: 0.2.0
+version: 0.2.1
 licence: MIT
 requirements: dateparser
 """
