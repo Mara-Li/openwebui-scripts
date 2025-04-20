@@ -11,8 +11,7 @@ git_url: https://github.com/mara-li/openwebui-scripts
 
 from pydantic import BaseModel, Field
 from typing import Optional, Callable, Any
-from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
+from datetime import datetime
 
 
 class Filter:
@@ -21,11 +20,6 @@ class Filter:
             default=False,
             description="Active le mode debug, pour afficher les logs dans la console",
             title="Mode debug",
-        )
-        timezone: str = Field(
-            default="Europe/Paris",
-            description="Fuseau horaire par défaut pour les dates et heures",
-            title="Fuseau horaire",
         )
 
     class UserValves(BaseModel):
@@ -89,32 +83,6 @@ class Filter:
                 continue
         return None
 
-    def _get_current_date(self) -> str:
-        """
-        Get the current date.
-        :return: The current date as a string.
-        """
-        # current_date = datetime.now().strftime("%A, %B %d, %Y")
-        # return f"Today's date is {current_date}"
-
-        now_utc = datetime.now(timezone.utc)
-        tz = ZoneInfo(self.valves.timezone)
-        now_desired = now_utc.astimezone(tz)
-        return now_desired.strftime("%d/%m/%Y")
-
-    def _get_current_time(self) -> str:
-        """
-        Get the current time.
-        :return: The current time as a string.
-        """
-        # current_time = datetime.now().strftime("%H:%M:%S")
-        # return f"Current Time: {current_time}"
-
-        now_utc = datetime.now(timezone.utc)
-        tz = ZoneInfo(self.valves.timezone)
-        now_desired = now_utc.astimezone(tz)
-        return now_desired.strftime("%H:%M")
-
     def _print(self, *message: object):
         if self.valves.debug:
             print("[AddUserInfo]", *message)
@@ -175,10 +143,7 @@ class Filter:
                 autre_message = f"Autres informations entrée par l'utilisateur: {self.user_valves.autres_infos}\n"
 
         # Construire le contenu du message système
-        system_message = "------ SYSTEM INFO ------\n"
-        system_message += f"- Date du jour : {self._get_current_date()}\n"
-        system_message += f"- Heure du message : {self._get_current_time()}\n"
-        system_message += "------ USER INFO ------\n"
+        system_message = "------ USER INFO ------\n"
         system_message += "Voici des informations à propos de l'utilisateur :\n"
         for key, val in user_info.items():
             system_message += f"- {key} : {val}\n"
