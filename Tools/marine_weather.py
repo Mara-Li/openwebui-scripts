@@ -436,10 +436,12 @@ class Tools:
 
             # Parse date
             languages = ["en", self.user_valves.lang] if self.user_valves.lang else ["en"]
-            parsed_date = dateparser.parse(date, languages=languages) if date else dateparser.parse("today")
+            parsed_date = dateparser.parse(date_string=date, languages=languages) if date else dateparser.parse("today")
 
             # Generate report
-            report = format_weather_report(data, parsed_date, self.user_valves, hour)
+            report = format_weather_report(
+                weather_data=data, parsed_date=parsed_date, user_valves=self.user_valves, hour=hour
+            )
 
             # Success
             await emit_status(__event_emitter__, "Weather data fetched successfully.", True)
